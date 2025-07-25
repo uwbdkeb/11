@@ -63,4 +63,4 @@ def get_schedule(day: str):
 # === /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет!
+        "Привет")

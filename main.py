@@ -63,4 +63,112 @@ def get_schedule(day: str):
 # === /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет")
+        "Привет! Я — бот с расписанием 📚\n"
+        "Выбери действие в меню👇",
+        reply_markup=reply_markup
+    )
+
+# === Расписание по дням ===
+async def day_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower().replace("📅 ", "")
+    day_map = {
+        "понедельник": "понедельник", "вторник": "вторник", "среда": "среда",
+        "четверг": "четверг", "пятница": "пятница", "суббота": "суббота",
+        "воскресенье": "воскресенье",
+        "сегодня": datetime.now(MOSCOW_TZ).strftime('%A').lower()
+    }
+    weekday_map = {
+        'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
+        'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
+    }
+    target_day = day_map.get(text)
+    if target_day == "сегодня":
+        target_day = weekday_map.get(datetime.now(MOSCOW_TZ).strftime('%A').lower())
+
+    if target_day:
+        await update.message.reply_text(get_schedule(target_day), reply_markup=reply_markup)
+
+# === Добавить пару ===
+async def add_lesson_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Введите: День Время Предмет Кабинет\n"
+        "Пример: понедельник 09:00 Математика Ауд. 205"
+    )
+    context.user_data['awaiting_lesson'] = True
+
+async def handle_lesson_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('awaiting_lesson'):
+        try:
+            parts = update.message.text.split(" ", 3)
+            if len(parts) < 4:
+                await update.message.reply_text("❌ Неверный формат.")
+                return
+
+            day, time, subject, classroom = [p.strip() for p in parts]
+            day = day.lower()
+
+            conn = sqlite3.connect('schedule.db')
+            c = conn.cursor()
+            c.execute("INSERT INTO lessons (day, time, subject, classroom) VALUES (?, ?, ?, ?)",
+                      (day, time, subject, classroom))
+            conn.commit()
+            conn.close()
+
+            await update.message.reply_text(f"✅ Добавлено: {day} в {time} — {subject}")
+            context.user_data['awaiting_lesson'] = False
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+# === Напоминания ===
+async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(MOSCOW_TZ)
+    target_time = (now + timedelta(minutes=15)).strftime('%H:%M')
+    target_day = now.strftime('%A').lower()
+    day_map = {
+        'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
+        'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
+    }
+    ru_day = day_map.get(target_day, 'понедельник')
+
+    conn = sqlite3.connect('schedule.db')
+    c = conn.cursor()
+    c.execute("SELECT subject, classroom FROM lessons WHERE day=? AND time=?", (ru_day, target_time))
+    rows = c.fetchall()
+    conn.close()
+
+    for subject, classroom in rows:
+        # ⚠️ Замени YOUR_USER_ID на свой (узнай у @userinfobot)
+        await context.bot.send_message(
+            chat_id=YOUR_USER_ID,
+            text=f"🔔 Через 15 минут: {subject} в {classroom}"
+        )
+
+# === Веб-сервер для keep-alive ===
+app_flask = Flask(__name__)
+@app_flask.route('/')
+def index():
+    return "Бот работает! 🚀"
+
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    app_flask.run(host="0.0.0.0", port=port)
+
+# === Запуск ===
+if __name__ == "__main__":
+    init_db()
+
+    from threading import Thread
+    Thread(target=run_flask, daemon=True).start()
+
+    # Напоминания каждую минуту
+    scheduler.add_job(send_reminders, 'interval', minutes=1, args=[ContextTypes.DEFAULT_TYPE])
+    scheduler.start()
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(➕ Добавить пару)$"), add_lesson_prompt))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(📅 (Понедельник|Вторник|Среда|Четверг|Пятница|Суббота|Воскресенье|Сегодня))$"), day_schedule))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_lesson_input))
+
+    app.run_polling()

@@ -139,7 +139,7 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     for subject, classroom in rows:
         # ⚠️ Замени YOUR_USER_ID на свой (узнай у @userinfobot)
         await context.bot.send_message(
-            chat_id=YOUR_USER_ID,
+            chat_id=os.getenv("ADMIN_USER_ID"),
             text=f"🔔 Через 15 минут: {subject} в {classroom}"
         )
 

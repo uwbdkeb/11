@@ -2,18 +2,26 @@ import os
 import sqlite3
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
 import pytz
 from flask import Flask
+import logging
 
 # === Настройки ===
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("Требуется TELEGRAM_TOKEN")
 
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
+
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
-scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
+
+# === Логирование ===
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # === Клавиатура ===
 keyboard = [
@@ -75,12 +83,13 @@ async def day_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "понедельник": "понедельник", "вторник": "вторник", "среда": "среда",
         "четверг": "четверг", "пятница": "пятница", "суббота": "суббота",
         "воскресенье": "воскресенье",
-        "сегодня": datetime.now(MOSCOW_TZ).strftime('%A').lower()
+        "сегодня": "сегодня"
     }
     weekday_map = {
         'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
         'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
     }
+    
     target_day = day_map.get(text)
     if target_day == "сегодня":
         target_day = weekday_map.get(datetime.now(MOSCOW_TZ).strftime('%A').lower())
@@ -121,30 +130,34 @@ async def handle_lesson_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # === Напоминания ===
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(MOSCOW_TZ)
-    target_time = (now + timedelta(minutes=15)).strftime('%H:%M')
-    target_day = now.strftime('%A').lower()
-    day_map = {
-        'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
-        'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
-    }
-    ru_day = day_map.get(target_day, 'понедельник')
+    try:
+        now = datetime.now(MOSCOW_TZ)
+        target_time = (now + timedelta(minutes=15)).strftime('%H:%M')
+        target_day = now.strftime('%A').lower()
+        day_map = {
+            'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
+            'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'
+        }
+        ru_day = day_map.get(target_day, 'понедельник')
 
-    conn = sqlite3.connect('schedule.db')
-    c = conn.cursor()
-    c.execute("SELECT subject, classroom FROM lessons WHERE day=? AND time=?", (ru_day, target_time))
-    rows = c.fetchall()
-    conn.close()
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute("SELECT subject, classroom FROM lessons WHERE day=? AND time=?", (ru_day, target_time))
+        rows = c.fetchall()
+        conn.close()
 
-    for subject, classroom in rows:
-        # ⚠️ Замени YOUR_USER_ID на свой (узнай у @userinfobot)
-        await context.bot.send_message(
-            chat_id=os.getenv("ADMIN_USER_ID"),
-            text=f"🔔 Через 15 минут: {subject} в {classroom}"
-        )
+        for subject, classroom in rows:
+            if ADMIN_USER_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_USER_ID,
+                    text=f"🔔 Через 15 минут: {subject} в {classroom}"
+                )
+    except Exception as e:
+        logger.error(f"Ошибка в send_reminders: {e}")
 
 # === Веб-сервер для keep-alive ===
 app_flask = Flask(__name__)
+
 @app_flask.route('/')
 def index():
     return "Бот работает! 🚀"
@@ -153,6 +166,10 @@ def run_flask():
     port = int(os.getenv("PORT", 8080))
     app_flask.run(host="0.0.0.0", port=port)
 
+# === Инициализация Job Queue ===
+async def post_init(application: ApplicationBuilder) -> None:
+    application.job_queue.run_repeating(send_reminders, interval=60, first=10)
+
 # === Запуск ===
 if __name__ == "__main__":
     init_db()
@@ -160,11 +177,7 @@ if __name__ == "__main__":
     from threading import Thread
     Thread(target=run_flask, daemon=True).start()
 
-    # Напоминания каждую минуту
-    scheduler.add_job(send_reminders, 'interval', minutes=1, args=[ContextTypes.DEFAULT_TYPE])
-    scheduler.start()
-
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(➕ Добавить пару)$"), add_lesson_prompt))
